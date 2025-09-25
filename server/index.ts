@@ -1,6 +1,9 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { drizzle } from 'drizzle-orm/neon-http';
+import { neon } from '@neondatabase/serverless';
+import { sql } from 'drizzle-orm';
 
 const app = express();
 app.use(express.json());
@@ -37,6 +40,47 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Database health check and schema validation
+  if (!process.env.DATABASE_URL) {
+    log('FATAL: DATABASE_URL not found. Cannot start server.');
+    process.exit(1);
+  }
+
+  try {
+    log('Checking database connectivity...');
+    const client = neon(process.env.DATABASE_URL);
+    const db = drizzle(client);
+    
+    // Test basic connectivity
+    await db.execute(sql`SELECT 1 as test`);
+    log('✓ Database connection successful');
+    
+    // Verify core tables exist
+    const tablesResult = await db.execute(sql`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      AND table_type = 'BASE TABLE'
+    `);
+    
+    // Handle Neon result format
+    const rows = Array.isArray(tablesResult) ? tablesResult : (tablesResult as any).rows || [];
+    const tableNames = rows.map((row: any) => row.table_name);
+    const requiredTables = ['users', 'habits', 'habit_entries', 'ai_nudges', 'user_stats'];
+    const missingTables = requiredTables.filter(table => !tableNames.includes(table));
+    
+    if (missingTables.length > 0) {
+      log(`FATAL: Missing database tables: ${missingTables.join(', ')}`);
+      log('Run "npm run db:push" to create the required tables');
+      process.exit(1);
+    }
+    
+    log('✓ Database schema validated - all required tables exist');
+  } catch (error) {
+    log(`FATAL: Database health check failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    process.exit(1);
+  }
+
   const server = await registerRoutes(app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
