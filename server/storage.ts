@@ -126,7 +126,8 @@ export class DatabaseStorage implements IStorage {
 
   // Session methods
   async createSession(userId: string, expiresAt: Date, data?: any): Promise<Session> {
-    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const crypto = await import('crypto');
+    const sessionId = `sess_${crypto.randomUUID()}`;
     const result = await db.insert(sessions).values({
       id: sessionId,
       userId,
@@ -162,7 +163,8 @@ export class DatabaseStorage implements IStorage {
 
   // Password reset methods
   async createPasswordResetToken(userId: string, expiresAt: Date): Promise<PasswordResetToken> {
-    const token = `reset_${Date.now()}_${Math.random().toString(36).substr(2, 16)}`;
+    const crypto = await import('crypto');
+    const token = crypto.randomBytes(32).toString('hex');
     const result = await db.insert(passwordResetTokens).values({
       userId,
       token,

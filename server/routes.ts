@@ -28,21 +28,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Register authentication routes
   registerAuthRoutes(app);
 
-  // Initialize demo user for backward compatibility (keep for AI nudge scheduling)
-  try {
-    let user = await storage.getUserByUsername("demo-user");
-    if (!user) {
-      user = await storage.createUser({
-        username: "demo-user",
-        email: "demo@habitflow.app",
-        password: "demo123456" // This will be properly hashed by storage
-      });
-      console.log('Created demo user with ID:', user.id);
+  // Initialize demo user for AI nudge scheduling only if explicitly enabled
+  if (process.env.ENABLE_DEMO_USER === 'true') {
+    try {
+      let user = await storage.getUserByUsername("demo-user");
+      if (!user) {
+        const crypto = await import('crypto');
+        const securePassword = crypto.randomBytes(16).toString('hex');
+        user = await storage.createUser({
+          username: "demo-user",
+          email: "demo@habitflow.app",
+          password: securePassword
+        });
+        console.log('Created demo user with ID:', user.id);
+        console.log('Demo user password (save this):', securePassword);
+      }
+      demoUserId = user.id;
+      console.log('Demo user enabled for periodic operations');
+    } catch (error) {
+      console.error('Failed to initialize demo user:', error);
     }
-    demoUserId = user.id;
-    console.log('Stored demo user ID for periodic operations:', demoUserId);
-  } catch (error) {
-    console.error('Failed to initialize demo user:', error);
   }
 
   // Habit routes - Protected

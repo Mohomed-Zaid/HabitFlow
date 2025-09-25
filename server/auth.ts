@@ -250,9 +250,7 @@ export function registerAuthRoutes(app: Express) {
       console.log(`Password reset token for ${email}: ${resetToken.token}`);
 
       res.json({ 
-        message: 'If an account with that email exists, a password reset link has been sent.',
-        // Remove this in production - only for demo
-        resetToken: resetToken.token
+        message: 'If an account with that email exists, a password reset link has been sent.'
       });
     } catch (error) {
       console.error('Password reset error:', error);
