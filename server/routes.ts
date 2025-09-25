@@ -9,6 +9,24 @@ import { z } from "zod";
 // In a real app, this would come from authentication
 const DEMO_USER_ID = "demo-user-123";
 
+// Simple notification system using in-memory storage
+interface Notification {
+  id: string;
+  userId: string;
+  type: 'reminder' | 'notification' | 'nudge' | 'challenge';
+  title: string;
+  message: string;
+  habitId?: string;
+  actionUrl?: string;
+  timestamp: string;
+  read: boolean;
+}
+
+const notifications = new Map<string, Notification[]>();
+
+// Store the actual demo user ID for periodic operations
+let demoUserId: string | null = null;
+
 export async function registerRoutes(app: Express): Promise<Server> {
   // Initialize demo user with idempotent seeding
   app.use(async (req, res, next) => {
@@ -23,6 +41,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           password: "hashed_demo_password_placeholder" // In production, this would be properly hashed
         });
         console.log('Created demo user with ID:', user.id);
+      }
+      
+      // Store the demo user ID for periodic operations
+      if (!demoUserId) {
+        demoUserId = user.id;
+        console.log('Stored demo user ID for periodic operations:', demoUserId);
       }
       
       req.userId = user.id;
@@ -388,7 +412,172 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Helper functions for notifications
+  function addNotification(userId: string, notification: Omit<Notification, 'id' | 'userId' | 'timestamp' | 'read'>) {
+    const newNotification: Notification = {
+      id: `notif-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      userId,
+      timestamp: new Date().toISOString(),
+      read: false,
+      ...notification
+    };
+
+    if (!notifications.has(userId)) {
+      notifications.set(userId, []);
+    }
+    
+    const userNotifications = notifications.get(userId)!;
+    userNotifications.unshift(newNotification); // Add to front
+    
+    // Keep only last 50 notifications per user
+    if (userNotifications.length > 50) {
+      userNotifications.splice(50);
+    }
+
+    return newNotification;
+  }
+
+  // Notification endpoints
+  app.get("/api/notifications", async (req, res) => {
+    try {
+      const userNotifications = notifications.get(req.userId) || [];
+      const unreadCount = userNotifications.filter(n => !n.read).length;
+      
+      res.json({
+        notifications: userNotifications,
+        unreadCount
+      });
+    } catch (error) {
+      console.error('Get notifications error:', error);
+      res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+  });
+
+  app.post("/api/notifications/:id/read", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const userNotifications = notifications.get(req.userId) || [];
+      const notification = userNotifications.find(n => n.id === id);
+      
+      if (!notification) {
+        return res.status(404).json({ error: 'Notification not found' });
+      }
+      
+      notification.read = true;
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Mark notification as read error:', error);
+      res.status(500).json({ error: 'Failed to mark notification as read' });
+    }
+  });
+
+  app.post("/api/notifications/mark-all-read", async (req, res) => {
+    try {
+      const userNotifications = notifications.get(req.userId) || [];
+      userNotifications.forEach(n => n.read = true);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Mark all notifications as read error:', error);
+      res.status(500).json({ error: 'Failed to mark all notifications as read' });
+    }
+  });
+
+  // Reminder/Notification endpoints
+  app.post("/api/reminders/schedule", async (req, res) => {
+    try {
+      const { habitId, time, message } = req.body;
+      
+      const notification = addNotification(req.userId, {
+        type: 'reminder',
+        title: 'Habit Reminder',
+        message: message || 'Time to check your habits!',
+        habitId
+      });
+
+      res.json({ success: true, notification });
+    } catch (error) {
+      console.error('Schedule reminder error:', error);
+      res.status(500).json({ error: 'Failed to schedule reminder' });
+    }
+  });
+
+  app.post("/api/notifications/send", async (req, res) => {
+    try {
+      const { type, title, message, actionUrl, habitId } = req.body;
+      
+      const notification = addNotification(req.userId, {
+        type: type || 'notification',
+        title,
+        message,
+        actionUrl,
+        habitId
+      });
+
+      res.json({ success: true, notification });
+    } catch (error) {
+      console.error('Send notification error:', error);
+      res.status(500).json({ error: 'Failed to send notification' });
+    }
+  });
+
+  // Generate AI nudge and create notification
+  app.post("/api/ai/request-nudge", async (req, res) => {
+    try {
+      const nudge = await aiService.generatePersonalizedNudge(req.userId);
+      
+      if (nudge) {
+        const notification = addNotification(req.userId, {
+          type: 'nudge',
+          title: nudge.title,
+          message: nudge.message,
+          habitId: nudge.habitId || undefined
+        });
+        
+        res.json({ nudge, notification });
+      } else {
+        res.status(404).json({ error: 'Unable to generate nudge' });
+      }
+    } catch (error) {
+      console.error('Request AI nudge error:', error);
+      res.status(500).json({ error: 'Failed to generate nudge' });
+    }
+  });
+
   const httpServer = createServer(app);
+
+  // Schedule periodic AI nudge generation (every hour for demo)
+  setInterval(async () => {
+    try {
+      // Only run if we have a demo user ID stored
+      if (!demoUserId) {
+        console.log('No demo user ID available for periodic nudge generation');
+        return;
+      }
+      
+      const userNotifications = notifications.get(demoUserId) || [];
+      const recentNudges = userNotifications.filter(n => 
+        n.type === 'nudge' && 
+        new Date(n.timestamp).getTime() > Date.now() - (60 * 60 * 1000) // Last hour
+      );
+      
+      // Only generate if no recent nudges
+      if (recentNudges.length === 0) {
+        const nudge = await aiService.generatePersonalizedNudge(demoUserId);
+        if (nudge) {
+          addNotification(demoUserId, {
+            type: 'nudge',
+            title: nudge.title,
+            message: nudge.message,
+            habitId: nudge.habitId || undefined
+          });
+          console.log(`Generated periodic AI nudge for user ${demoUserId}`);
+        }
+      }
+    } catch (error) {
+      console.error('Periodic AI nudge generation error:', error);
+    }
+  }, 60 * 60 * 1000); // 1 hour
+
   return httpServer;
 }
 
