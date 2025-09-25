@@ -35,12 +35,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let user = await storage.getUserByUsername("demo-user");
       
       if (!user) {
-        // Create demo user only if it doesn't exist
-        user = await storage.createUser({
-          username: "demo-user",
-          password: "hashed_demo_password_placeholder" // In production, this would be properly hashed
-        });
-        console.log('Created demo user with ID:', user.id);
+        try {
+          // Create demo user only if it doesn't exist
+          user = await storage.createUser({
+            username: "demo-user",
+            password: "hashed_demo_password_placeholder" // In production, this would be properly hashed
+          });
+          console.log('Created demo user with ID:', user.id);
+        } catch (createError: any) {
+          // If user creation fails due to duplicate key, try to fetch again
+          if (createError.code === '23505') {
+            user = await storage.getUserByUsername("demo-user");
+            if (!user) {
+              throw createError; // Re-throw if still can't find user
+            }
+          } else {
+            throw createError; // Re-throw other errors
+          }
+        }
       }
       
       // Store the demo user ID for periodic operations
