@@ -10,30 +10,27 @@ import { z } from "zod";
 const DEMO_USER_ID = "demo-user-123";
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Initialize demo user if needed
+  // Initialize demo user with idempotent seeding
   app.use(async (req, res, next) => {
     try {
-      let user = await storage.getUser(DEMO_USER_ID);
+      // Try to find existing demo user by username
+      let user = await storage.getUserByUsername("demo-user");
+      
       if (!user) {
+        // Create demo user only if it doesn't exist
         user = await storage.createUser({
-          username: "demo",
-          password: "demo"
-        });
-        // Update the user ID to match our demo ID
-        const created = await storage.createUser({
           username: "demo-user",
-          password: "demo"
+          password: "hashed_demo_password_placeholder" // In production, this would be properly hashed
         });
-        // For the demo, we'll just use the created user's ID
-        req.userId = created.id;
-      } else {
-        req.userId = user.id;
+        console.log('Created demo user with ID:', user.id);
       }
+      
+      req.userId = user.id;
       next();
     } catch (error) {
       console.error('Auth middleware error:', error);
-      req.userId = DEMO_USER_ID;
-      next();
+      // If we can't create or find the demo user, this is a critical error
+      return res.status(500).json({ error: 'Failed to initialize user session' });
     }
   });
 

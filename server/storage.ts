@@ -217,21 +217,39 @@ export class DatabaseStorage implements IStorage {
 
     if (entries.length === 0) return 0;
 
-    let streak = 0;
-    const today = new Date();
-    let currentDate = new Date(today);
+    // Sort dates in descending order (most recent first)
+    const completedDates = entries.map(e => e.date).sort().reverse();
     
-    // Check each day going backwards
-    for (let i = 0; i < entries.length; i++) {
-      const dateStr = currentDate.toISOString().split('T')[0];
-      const entry = entries.find(e => e.date === dateStr);
+    let streak = 0;
+    const today = new Date().toISOString().split('T')[0];
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    
+    // Start checking from today or yesterday (allow for streaks that ended yesterday)
+    let currentDate = today;
+    if (!completedDates.includes(today) && completedDates.includes(yesterdayStr)) {
+      currentDate = yesterdayStr;
+    }
+    
+    // If neither today nor yesterday is completed, no active streak
+    if (!completedDates.includes(currentDate)) {
+      return 0;
+    }
+    
+    // Count backwards from the starting date
+    let checkDate = new Date(currentDate);
+    for (const completedDate of completedDates) {
+      const dateStr = checkDate.toISOString().split('T')[0];
       
-      if (entry) {
+      if (completedDate === dateStr) {
         streak++;
-        currentDate.setDate(currentDate.getDate() - 1);
-      } else {
+        checkDate.setDate(checkDate.getDate() - 1);
+      } else if (completedDate < dateStr) {
+        // We've found a gap in the streak
         break;
       }
+      // If completedDate > dateStr, continue looking for the matching date
     }
 
     return streak;

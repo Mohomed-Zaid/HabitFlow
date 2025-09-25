@@ -2,8 +2,15 @@ import OpenAI from "openai";
 import { storage } from "./storage";
 import type { Habit, HabitEntry, AiNudge } from "@shared/schema";
 
+// Check for API key at startup
+if (!process.env.OPENAI_API_KEY) {
+  console.warn('⚠️  OpenAI API key not found. AI features will return mock responses.');
+}
+
 // the newest OpenAI model is "gpt-5" which was released August 7, 2025. do not change this unless explicitly requested by the user
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = process.env.OPENAI_API_KEY 
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) 
+  : null;
 
 interface UserContext {
   habits: Habit[];
@@ -23,6 +30,11 @@ export class AiService {
         return null; // No habits to generate nudges for
       }
 
+      // If no OpenAI API key, use mock response
+      if (!openai) {
+        return await this.generateMockNudge(userId, context);
+      }
+
       const prompt = this.buildNudgePrompt(context);
       
       const response = await openai.chat.completions.create({
@@ -40,7 +52,18 @@ export class AiService {
         response_format: { type: "json_object" }
       });
 
-      const result = JSON.parse(response.choices[0].message.content || '{}');
+      const rawContent = response.choices[0].message.content;
+      if (!rawContent) {
+        throw new Error('Empty response from OpenAI');
+      }
+
+      let result;
+      try {
+        result = JSON.parse(rawContent);
+      } catch (parseError) {
+        console.error('Failed to parse OpenAI JSON response:', rawContent);
+        throw new Error('Invalid JSON response from OpenAI');
+      }
       
       // Validate and create the nudge
       const nudgeData = {
@@ -55,7 +78,9 @@ export class AiService {
       return await storage.createAiNudge(nudgeData);
     } catch (error) {
       console.error('AI nudge generation error:', error);
-      return null;
+      // Fallback to mock nudge on error
+      const context = await this.getUserContext(userId);
+      return await this.generateMockNudge(userId, context);
     }
   }
 
@@ -65,6 +90,11 @@ export class AiService {
       
       if (context.habits.length === 0) {
         return null;
+      }
+
+      // If no OpenAI API key, use mock response
+      if (!openai) {
+        return await this.generateMockChallenge(userId, context);
       }
 
       const prompt = this.buildChallengePrompt(context);
@@ -84,7 +114,18 @@ export class AiService {
         response_format: { type: "json_object" }
       });
 
-      const result = JSON.parse(response.choices[0].message.content || '{}');
+      const rawContent = response.choices[0].message.content;
+      if (!rawContent) {
+        throw new Error('Empty response from OpenAI');
+      }
+
+      let result;
+      try {
+        result = JSON.parse(rawContent);
+      } catch (parseError) {
+        console.error('Failed to parse OpenAI JSON response:', rawContent);
+        throw new Error('Invalid JSON response from OpenAI');
+      }
       
       const challengeData = {
         userId,
@@ -98,7 +139,8 @@ export class AiService {
       return await storage.createAiNudge(challengeData);
     } catch (error) {
       console.error('AI challenge generation error:', error);
-      return null;
+      const context = await this.getUserContext(userId);
+      return await this.generateMockChallenge(userId, context);
     }
   }
 
@@ -106,6 +148,11 @@ export class AiService {
     try {
       const context = await this.getUserContext(userId);
       const targetHabit = habitId ? context.habits.find(h => h.id === habitId) : null;
+      
+      // If no OpenAI API key, use mock response
+      if (!openai) {
+        return await this.generateMockMotivation(userId, context, targetHabit);
+      }
       
       const prompt = this.buildMotivationPrompt(context, targetHabit);
       
@@ -124,7 +171,18 @@ export class AiService {
         response_format: { type: "json_object" }
       });
 
-      const result = JSON.parse(response.choices[0].message.content || '{}');
+      const rawContent = response.choices[0].message.content;
+      if (!rawContent) {
+        throw new Error('Empty response from OpenAI');
+      }
+
+      let result;
+      try {
+        result = JSON.parse(rawContent);
+      } catch (parseError) {
+        console.error('Failed to parse OpenAI JSON response:', rawContent);
+        throw new Error('Invalid JSON response from OpenAI');
+      }
       
       const motivationData = {
         userId,
@@ -138,13 +196,20 @@ export class AiService {
       return await storage.createAiNudge(motivationData);
     } catch (error) {
       console.error('AI motivation generation error:', error);
-      return null;
+      const context = await this.getUserContext(userId);
+      const targetHabit = habitId ? context.habits.find(h => h.id === habitId) : null;
+      return await this.generateMockMotivation(userId, context, targetHabit);
     }
   }
 
   async generateHabitSuggestions(userId: string, category?: string): Promise<string[]> {
     try {
       const context = await this.getUserContext(userId);
+      
+      // If no OpenAI API key, use mock suggestions
+      if (!openai) {
+        return this.getMockHabitSuggestions(category);
+      }
       
       const prompt = `Based on the user's existing habits and patterns, suggest 5 new healthy habits they could adopt.
 
@@ -172,11 +237,23 @@ Respond with JSON: { "suggestions": ["habit1", "habit2", "habit3", "habit4", "ha
         response_format: { type: "json_object" }
       });
 
-      const result = JSON.parse(response.choices[0].message.content || '{}');
+      const rawContent = response.choices[0].message.content;
+      if (!rawContent) {
+        throw new Error('Empty response from OpenAI');
+      }
+
+      let result;
+      try {
+        result = JSON.parse(rawContent);
+      } catch (parseError) {
+        console.error('Failed to parse OpenAI JSON response:', rawContent);
+        throw new Error('Invalid JSON response from OpenAI');
+      }
+      
       return result.suggestions || [];
     } catch (error) {
       console.error('AI habit suggestions error:', error);
-      return [];
+      return this.getMockHabitSuggestions(category);
     }
   }
 
@@ -298,6 +375,153 @@ Respond with JSON: {
   "message": "encouraging message about their journey (2-3 sentences)",
   "actionLabel": null
 }`;
+  }
+
+  // Mock methods for when OpenAI API is not available
+  private async generateMockNudge(userId: string, context: UserContext): Promise<AiNudge> {
+    const mockNudges = [
+      {
+        type: 'motivation' as const,
+        title: 'You\'re building momentum!',
+        message: 'Every small step counts. Keep up the great work with your daily habits.',
+        habitId: null,
+        actionLabel: null
+      },
+      {
+        type: 'reminder' as const,
+        title: 'Don\'t forget your habits today',
+        message: 'Take a moment to check in with your habits. Consistency is key to lasting change.',
+        habitId: null,
+        actionLabel: 'Check Habits'
+      },
+      {
+        type: 'tip' as const,
+        title: 'Pro Tip: Stack your habits',
+        message: 'Try linking new habits to existing routines. After you brush your teeth, do 5 minutes of meditation.',
+        habitId: null,
+        actionLabel: null
+      }
+    ];
+
+    const randomNudge = mockNudges[Math.floor(Math.random() * mockNudges.length)];
+    
+    return await storage.createAiNudge({
+      userId,
+      ...randomNudge
+    });
+  }
+
+  private async generateMockChallenge(userId: string, context: UserContext): Promise<AiNudge> {
+    const mockChallenges = [
+      {
+        title: '5-Minute Energy Boost',
+        message: 'Take 5 deep breaths and do 10 jumping jacks to energize your day.',
+        actionLabel: 'Complete Challenge'
+      },
+      {
+        title: 'Gratitude Moment',
+        message: 'Write down 3 things you\'re grateful for today. Focus on small, everyday moments.',
+        actionLabel: 'Complete Challenge'
+      },
+      {
+        title: 'Hydration Check',
+        message: 'Drink a full glass of water and notice how refreshed you feel afterwards.',
+        actionLabel: 'Complete Challenge'
+      },
+      {
+        title: 'Mindful Minute',
+        message: 'Spend 60 seconds focusing only on your breathing. Let thoughts pass without judgment.',
+        actionLabel: 'Complete Challenge'
+      }
+    ];
+
+    const randomChallenge = mockChallenges[Math.floor(Math.random() * mockChallenges.length)];
+    
+    return await storage.createAiNudge({
+      userId,
+      habitId: null,
+      type: 'challenge',
+      ...randomChallenge
+    });
+  }
+
+  private async generateMockMotivation(userId: string, context: UserContext, targetHabit?: Habit | null): Promise<AiNudge> {
+    if (targetHabit) {
+      const streak = context.streaks[targetHabit.id] || 0;
+      
+      return await storage.createAiNudge({
+        userId,
+        habitId: targetHabit.id,
+        type: 'motivation',
+        title: `${targetHabit.name} Progress`,
+        message: streak > 0 
+          ? `Great job on your ${streak}-day streak with ${targetHabit.name}! You're building lasting change.`
+          : `Every expert was once a beginner. Start your ${targetHabit.name} journey today!`,
+        actionLabel: null
+      });
+    }
+
+    return await storage.createAiNudge({
+      userId,
+      habitId: null,
+      type: 'motivation',
+      title: 'Your Habit Journey',
+      message: `You've completed ${context.todaysCompletions} out of ${context.totalHabits} habits today. Progress, not perfection!`,
+      actionLabel: null
+    });
+  }
+
+  private getMockHabitSuggestions(category?: string): string[] {
+    const suggestions = {
+      fitness: [
+        'Take the stairs instead of the elevator',
+        '10 pushups every morning',
+        'Walk for 15 minutes after lunch',
+        'Stretch for 5 minutes before bed',
+        'Do desk exercises every 2 hours'
+      ],
+      nutrition: [
+        'Eat a piece of fruit with breakfast',
+        'Drink a glass of water before each meal',
+        'Pack a healthy snack for work',
+        'Eat vegetables with dinner',
+        'Take a daily vitamin'
+      ],
+      mindfulness: [
+        'Practice 5 minutes of deep breathing',
+        'Write one sentence in a gratitude journal',
+        'Meditate for 10 minutes',
+        'Practice mindful eating for one meal',
+        'Do a body scan before sleep'
+      ],
+      productivity: [
+        'Make your bed every morning',
+        'Plan your top 3 priorities each day',
+        'Clear your desk at the end of workday',
+        'Review your day in the evening',
+        'Prepare tomorrow\'s clothes the night before'
+      ],
+      sleep: [
+        'Set a consistent bedtime',
+        'Turn off screens 1 hour before bed',
+        'Read for 15 minutes before sleep',
+        'Keep a sleep diary',
+        'Avoid caffeine after 2 PM'
+      ]
+    };
+
+    if (category && suggestions[category as keyof typeof suggestions]) {
+      return suggestions[category as keyof typeof suggestions];
+    }
+
+    // Return a mix if no specific category or category not found
+    return [
+      'Drink 8 glasses of water daily',
+      'Take a 10-minute walk after meals',
+      'Write down 3 goals each morning',
+      'Practice gratitude before bed',
+      'Spend 5 minutes organizing your space'
+    ];
   }
 }
 
