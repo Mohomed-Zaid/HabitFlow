@@ -2,12 +2,9 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { aiService } from "./ai-service";
+import { registerAuthRoutes, authenticateSession, optionalAuth, type AuthenticatedRequest } from "./auth";
 import { insertHabitSchema, insertHabitEntrySchema, insertAiNudgeSchema } from "@shared/schema";
 import { z } from "zod";
-
-// For demo purposes, we'll use a hardcoded user ID
-// In a real app, this would come from authentication
-const DEMO_USER_ID = "demo-user-123";
 
 // Simple notification system using in-memory storage
 interface Notification {
@@ -24,56 +21,34 @@ interface Notification {
 
 const notifications = new Map<string, Notification[]>();
 
-// Store the actual demo user ID for periodic operations
+// Store demo user ID for backward compatibility with existing functionality
 let demoUserId: string | null = null;
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Initialize demo user with idempotent seeding
-  app.use(async (req, res, next) => {
-    try {
-      // Try to find existing demo user by username
-      let user = await storage.getUserByUsername("demo-user");
-      
-      if (!user) {
-        try {
-          // Create demo user only if it doesn't exist
-          user = await storage.createUser({
-            username: "demo-user",
-            password: "hashed_demo_password_placeholder" // In production, this would be properly hashed
-          });
-          console.log('Created demo user with ID:', user.id);
-        } catch (createError: any) {
-          // If user creation fails due to duplicate key, try to fetch again
-          if (createError.code === '23505') {
-            user = await storage.getUserByUsername("demo-user");
-            if (!user) {
-              throw createError; // Re-throw if still can't find user
-            }
-          } else {
-            throw createError; // Re-throw other errors
-          }
-        }
-      }
-      
-      // Store the demo user ID for periodic operations
-      if (!demoUserId) {
-        demoUserId = user.id;
-        console.log('Stored demo user ID for periodic operations:', demoUserId);
-      }
-      
-      req.userId = user.id;
-      next();
-    } catch (error) {
-      console.error('Auth middleware error:', error);
-      // If we can't create or find the demo user, this is a critical error
-      return res.status(500).json({ error: 'Failed to initialize user session' });
-    }
-  });
+  // Register authentication routes
+  registerAuthRoutes(app);
 
-  // Habit routes
-  app.get("/api/habits", async (req, res) => {
+  // Initialize demo user for backward compatibility (keep for AI nudge scheduling)
+  try {
+    let user = await storage.getUserByUsername("demo-user");
+    if (!user) {
+      user = await storage.createUser({
+        username: "demo-user",
+        email: "demo@habitflow.app",
+        password: "demo123456" // This will be properly hashed by storage
+      });
+      console.log('Created demo user with ID:', user.id);
+    }
+    demoUserId = user.id;
+    console.log('Stored demo user ID for periodic operations:', demoUserId);
+  } catch (error) {
+    console.error('Failed to initialize demo user:', error);
+  }
+
+  // Habit routes - Protected
+  app.get("/api/habits", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
-      const habits = await storage.getUserHabits(req.userId);
+      const habits = await storage.getUserHabits(req.userId!);
       
       // Enhance habits with current completion status and streak
       const today = new Date().toISOString().split('T')[0];
@@ -99,12 +74,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/habits", async (req, res) => {
+  app.post("/api/habits", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const validatedData = insertHabitSchema.parse(req.body);
       const habit = await storage.createHabit({
         ...validatedData,
-        userId: req.userId
+        userId: req.userId!
       });
       res.status(201).json(habit);
     } catch (error) {
@@ -117,11 +92,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.put("/api/habits/:id", async (req, res) => {
+  app.put("/api/habits/:id", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
       const validatedData = insertHabitSchema.partial().parse(req.body);
-      const habit = await storage.updateHabit(id, req.userId, validatedData);
+      const habit = await storage.updateHabit(id, req.userId!, validatedData);
       
       if (!habit) {
         return res.status(404).json({ error: 'Habit not found' });
@@ -138,10 +113,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.delete("/api/habits/:id", async (req, res) => {
+  app.delete("/api/habits/:id", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      const success = await storage.deleteHabit(id, req.userId);
+      const success = await storage.deleteHabit(id, req.userId!);
       
       if (!success) {
         return res.status(404).json({ error: 'Habit not found' });
@@ -154,8 +129,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Habit tracking routes
-  app.post("/api/habits/:id/toggle", async (req, res) => {
+  // Habit tracking routes - Protected
+  app.post("/api/habits/:id/toggle", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { id: habitId } = req.params;
       const { completed, date, notes } = req.body;
@@ -164,7 +139,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const entry = await storage.createOrUpdateHabitEntry({
         habitId,
-        userId: req.userId,
+        userId: req.userId!,
         date: targetDate,
         completed: completed !== undefined ? completed : true,
         notes
@@ -177,12 +152,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/habits/:id/entries", async (req, res) => {
+  app.get("/api/habits/:id/entries", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { id: habitId } = req.params;
       const limit = parseInt(req.query.limit as string) || 30;
       
-      const entries = await storage.getHabitEntries(habitId, req.userId, limit);
+      const entries = await storage.getHabitEntries(habitId, req.userId!, limit);
       res.json(entries);
     } catch (error) {
       console.error('Get habit entries error:', error);
@@ -190,8 +165,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Progress analytics routes
-  app.get("/api/progress/weekly", async (req, res) => {
+  // Progress analytics routes - Protected
+  app.get("/api/progress/weekly", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const today = new Date();
       const weeklyData = [];
@@ -201,8 +176,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         date.setDate(date.getDate() - i);
         const dateStr = date.toISOString().split('T')[0];
         
-        const entries = await storage.getUserHabitEntriesForDate(req.userId, dateStr);
-        const userHabits = await storage.getUserHabits(req.userId);
+        const entries = await storage.getUserHabitEntriesForDate(req.userId!, dateStr);
+        const userHabits = await storage.getUserHabits(req.userId!);
         const completed = entries.filter(e => e.completed).length;
         const total = userHabits.length;
         const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
@@ -222,7 +197,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/progress/monthly", async (req, res) => {
+  app.get("/api/progress/monthly", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const today = new Date();
       const monthlyData = [];
@@ -238,8 +213,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         for (let d = new Date(weekStart); d <= weekEnd; d.setDate(d.getDate() + 1)) {
           const dateStr = d.toISOString().split('T')[0];
-          const entries = await storage.getUserHabitEntriesForDate(req.userId, dateStr);
-          const userHabits = await storage.getUserHabits(req.userId);
+          const entries = await storage.getUserHabitEntriesForDate(req.userId!, dateStr);
+          const userHabits = await storage.getUserHabits(req.userId!);
           totalCompleted += entries.filter(e => e.completed).length;
           totalPossible += userHabits.length;
         }
@@ -261,14 +236,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // User stats route
-  app.get("/api/stats", async (req, res) => {
+  // User stats route - Protected
+  app.get("/api/stats", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
-      let stats = await storage.getUserStats(req.userId);
-      const habits = await storage.getUserHabits(req.userId);
+      let stats = await storage.getUserStats(req.userId!);
+      const habits = await storage.getUserHabits(req.userId!);
       
       if (!stats) {
-        stats = await storage.updateUserStats(req.userId, {
+        stats = await storage.updateUserStats(req.userId!, {
           totalHabits: habits.length,
           activeHabits: habits.length,
           longestStreak: 0,
@@ -279,7 +254,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Calculate current streak across all habits
       const today = new Date().toISOString().split('T')[0];
-      const todayEntries = await storage.getUserHabitEntriesForDate(req.userId, today);
+      const todayEntries = await storage.getUserHabitEntriesForDate(req.userId!, today);
       const completedToday = todayEntries.filter(e => e.completed).length;
 
       res.json({
@@ -294,11 +269,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // AI Nudges routes
-  app.get("/api/nudges", async (req, res) => {
+  // AI Nudges routes - Protected
+  app.get("/api/nudges", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 10;
-      const nudges = await storage.getUserAiNudges(req.userId, limit);
+      const nudges = await storage.getUserAiNudges(req.userId!, limit);
       res.json(nudges);
     } catch (error) {
       console.error('Get nudges error:', error);
@@ -306,10 +281,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/nudges/:id/dismiss", async (req, res) => {
+  app.post("/api/nudges/:id/dismiss", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      const success = await storage.dismissNudge(id, req.userId);
+      const success = await storage.dismissNudge(id, req.userId!);
       
       if (!success) {
         return res.status(404).json({ error: 'Nudge not found' });
@@ -322,10 +297,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/nudges/:id/read", async (req, res) => {
+  app.post("/api/nudges/:id/read", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      const success = await storage.markNudgeAsRead(id, req.userId);
+      const success = await storage.markNudgeAsRead(id, req.userId!);
       
       if (!success) {
         return res.status(404).json({ error: 'Nudge not found' });
@@ -338,10 +313,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // AI-powered features
-  app.post("/api/ai/generate-nudge", async (req, res) => {
+  // AI-powered features - Protected
+  app.post("/api/ai/generate-nudge", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
-      const nudge = await aiService.generatePersonalizedNudge(req.userId);
+      const nudge = await aiService.generatePersonalizedNudge(req.userId!);
       
       if (!nudge) {
         return res.status(404).json({ error: 'Unable to generate nudge - no habits found' });
@@ -354,9 +329,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/ai/generate-challenge", async (req, res) => {
+  app.post("/api/ai/generate-challenge", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
-      const challenge = await aiService.generateDailyMicroChallenge(req.userId);
+      const challenge = await aiService.generateDailyMicroChallenge(req.userId!);
       
       if (!challenge) {
         return res.status(404).json({ error: 'Unable to generate challenge - no habits found' });
@@ -369,10 +344,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/ai/motivate", async (req, res) => {
+  app.post("/api/ai/motivate", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { habitId } = req.body;
-      const motivation = await aiService.generateMotivationalMessage(req.userId, habitId);
+      const motivation = await aiService.generateMotivationalMessage(req.userId!, habitId);
       
       if (!motivation) {
         return res.status(500).json({ error: 'Unable to generate motivation message' });
@@ -385,11 +360,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/ai/habit-suggestions", async (req, res) => {
+  app.get("/api/ai/habit-suggestions", authenticateSession, async (req: AuthenticatedRequest, res) => {
     try {
       const { category } = req.query;
       const suggestions = await aiService.generateHabitSuggestions(
-        req.userId, 
+        req.userId!, 
         category as string
       );
       

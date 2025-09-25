@@ -1,6 +1,7 @@
 import { drizzle } from 'drizzle-orm/neon-http';
 import { neon } from '@neondatabase/serverless';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, lt } from 'drizzle-orm';
+import bcrypt from 'bcrypt';
 import { 
   type User, 
   type InsertUser, 
@@ -11,11 +12,15 @@ import {
   type AiNudge,
   type InsertAiNudge,
   type UserStats,
+  type Session,
+  type PasswordResetToken,
   users,
   habits,
   habitEntries,
   aiNudges,
-  userStats
+  userStats,
+  sessions,
+  passwordResetTokens
 } from "@shared/schema";
 
 const client = neon(process.env.DATABASE_URL!);
@@ -25,7 +30,24 @@ export interface IStorage {
   // User methods
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
+  getUserByEmail(email: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  updateUser(id: string, updates: Partial<InsertUser>): Promise<User | undefined>;
+  
+  // Authentication methods
+  hashPassword(password: string): Promise<string>;
+  verifyPassword(password: string, hashedPassword: string): Promise<boolean>;
+  
+  // Session methods
+  createSession(userId: string, expiresAt: Date, data?: any): Promise<Session>;
+  getSession(sessionId: string): Promise<Session | undefined>;
+  deleteSession(sessionId: string): Promise<boolean>;
+  cleanExpiredSessions(): Promise<number>;
+  
+  // Password reset methods
+  createPasswordResetToken(userId: string, expiresAt: Date): Promise<PasswordResetToken>;
+  getPasswordResetToken(token: string): Promise<PasswordResetToken | undefined>;
+  markPasswordResetTokenAsUsed(tokenId: string): Promise<boolean>;
 
   // Habit methods
   getUserHabits(userId: string): Promise<Habit[]>;
@@ -64,9 +86,108 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const result = await db.insert(users).values(insertUser).returning();
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
     return result[0];
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    // Hash password before storing
+    const hashedPassword = await this.hashPassword(insertUser.password);
+    const result = await db.insert(users).values({
+      ...insertUser,
+      password: hashedPassword
+    }).returning();
+    return result[0];
+  }
+
+  async updateUser(id: string, updates: Partial<InsertUser>): Promise<User | undefined> {
+    // Hash password if it's being updated
+    if (updates.password) {
+      updates.password = await this.hashPassword(updates.password);
+    }
+    
+    const result = await db.update(users)
+      .set(updates)
+      .where(eq(users.id, id))
+      .returning();
+    return result[0];
+  }
+
+  // Authentication methods
+  async hashPassword(password: string): Promise<string> {
+    const saltRounds = 12;
+    return bcrypt.hash(password, saltRounds);
+  }
+
+  async verifyPassword(password: string, hashedPassword: string): Promise<boolean> {
+    return bcrypt.compare(password, hashedPassword);
+  }
+
+  // Session methods
+  async createSession(userId: string, expiresAt: Date, data?: any): Promise<Session> {
+    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const result = await db.insert(sessions).values({
+      id: sessionId,
+      userId,
+      expiresAt,
+      data: data || {}
+    }).returning();
+    return result[0];
+  }
+
+  async getSession(sessionId: string): Promise<Session | undefined> {
+    const result = await db.select().from(sessions)
+      .where(and(
+        eq(sessions.id, sessionId),
+        sql`expires_at > NOW()`
+      ))
+      .limit(1);
+    return result[0];
+  }
+
+  async deleteSession(sessionId: string): Promise<boolean> {
+    const result = await db.delete(sessions)
+      .where(eq(sessions.id, sessionId))
+      .returning();
+    return result.length > 0;
+  }
+
+  async cleanExpiredSessions(): Promise<number> {
+    const result = await db.delete(sessions)
+      .where(sql`expires_at <= NOW()`)
+      .returning();
+    return result.length;
+  }
+
+  // Password reset methods
+  async createPasswordResetToken(userId: string, expiresAt: Date): Promise<PasswordResetToken> {
+    const token = `reset_${Date.now()}_${Math.random().toString(36).substr(2, 16)}`;
+    const result = await db.insert(passwordResetTokens).values({
+      userId,
+      token,
+      expiresAt
+    }).returning();
+    return result[0];
+  }
+
+  async getPasswordResetToken(token: string): Promise<PasswordResetToken | undefined> {
+    const result = await db.select().from(passwordResetTokens)
+      .where(and(
+        eq(passwordResetTokens.token, token),
+        eq(passwordResetTokens.used, false),
+        sql`expires_at > NOW()`
+      ))
+      .limit(1);
+    return result[0];
+  }
+
+  async markPasswordResetTokenAsUsed(tokenId: string): Promise<boolean> {
+    const result = await db.update(passwordResetTokens)
+      .set({ used: true })
+      .where(eq(passwordResetTokens.id, tokenId))
+      .returning();
+    return result.length > 0;
   }
 
   // Habit methods
