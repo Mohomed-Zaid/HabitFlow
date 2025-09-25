@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import cookieParser from "cookie-parser";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { initializeWebSocket } from "./websocket";
 import { drizzle } from 'drizzle-orm/neon-http';
 import { neon } from '@neondatabase/serverless';
 import { sql } from 'drizzle-orm';
@@ -84,6 +85,10 @@ app.use((req, res, next) => {
   }
 
   const server = await registerRoutes(app);
+
+  // Initialize WebSocket server for real-time updates
+  initializeWebSocket(server);
+  log('✓ WebSocket server initialized for real-time updates');
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

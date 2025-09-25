@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { aiService } from "./ai-service";
 import { registerAuthRoutes, authenticateSession, optionalAuth, type AuthenticatedRequest } from "./auth";
+import { getWebSocketManager } from "./websocket";
 import { insertHabitSchema, insertHabitEntrySchema, insertAiNudgeSchema } from "@shared/schema";
 import { z } from "zod";
 
@@ -86,6 +87,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ...validatedData,
         userId: req.userId!
       });
+
+      // Send real-time update for new habit
+      const wsManager = getWebSocketManager();
+      if (wsManager) {
+        wsManager.broadcastToUser(req.userId!, {
+          type: 'habit_created',
+          userId: req.userId!,
+          habitId: habit.id,
+          data: habit,
+          timestamp: new Date().toISOString()
+        });
+      }
+
       res.status(201).json(habit);
     } catch (error) {
       console.error('Create habit error:', error);
@@ -149,6 +163,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         completed: completed !== undefined ? completed : true,
         notes
       });
+
+      // Send real-time updates via WebSocket
+      const wsManager = getWebSocketManager();
+      if (wsManager) {
+        await wsManager.notifyHabitCompletion(req.userId!, habitId, entry.completed);
+        await wsManager.notifyProgressUpdate(req.userId!);
+      }
 
       res.json(entry);
     } catch (error) {
@@ -325,6 +346,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       if (!nudge) {
         return res.status(404).json({ error: 'Unable to generate nudge - no habits found' });
+      }
+
+      // Send real-time AI nudge notification
+      const wsManager = getWebSocketManager();
+      if (wsManager) {
+        wsManager.notifyAiNudge(req.userId!, nudge);
       }
       
       res.json(nudge);
@@ -562,6 +589,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             message: nudge.message,
             habitId: nudge.habitId || undefined
           });
+          
+          // Send real-time notification via WebSocket
+          const wsManager = getWebSocketManager();
+          if (wsManager) {
+            wsManager.notifyAiNudge(demoUserId, nudge);
+          }
+          
           console.log(`Generated periodic AI nudge for user ${demoUserId}`);
         }
       }
